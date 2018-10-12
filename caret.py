@@ -83,13 +83,12 @@ class Main(object):
         for g in root.xpath('./svg:g', namespaces=nsmap):
             id_ = re.sub(r'_x([\da-fA-F][\da-fA-F])_', lambda match_o: chr(int(match_o.group(1), 16)), g.get('id'))
             id_ = id_.replace('_', ' ')
-            print 'layer id', id_
+            print 'working on layer', id_
             matches = re.search(r'(?:(\d+)([a-z]?))\s*.*$', id_)
             if matches:
                 slide = matches.group(1)
                 section_suffix = matches.group(2)
                 depth = slide
-                print matches.groups()
                 for path in g.xpath('.//svg:path', namespaces=nsmap):
                     #print etree.tostring(path)
                     p = parsePath(path.get('d'))
@@ -97,8 +96,9 @@ class Main(object):
                     fill = path.get('fill')
                     #color = stroke or fill
                     #print color, p
-                    if stroke == '#313185' or fill.lower() == '#00aeef':
-                        vertices = self.get_vertices(p)
+                    parsed_vertices = self.get_vertices(p)
+                    if stroke == '#313185' or fill.lower() == '#00aeef' or len(parsed_vertices) == 26:
+                        vertices = parsed_vertices
                         zipped = zip(*vertices)
                         center = (sum(zipped[0]) / len(zipped[0]), sum(zipped[1]) / len(zipped[1]))
                         #print 'cell', center
@@ -107,16 +107,20 @@ class Main(object):
                     elif fill == '#313185':
                         pass
                     else:
-                        contour_vertices = self.get_vertices(p)
+                        contour_vertices = parsed_vertices
+                        print 'contour stroke', stroke, 'fill', fill, 'treated as contour', 'vertices', len(contour_vertices)
                         #print 'contour', [('%.3f,%.3f' % c) for c in contour_vertices]
                         all_contours.append((id_, depth, contour_vertices))
                         all_vertices.extend(contour_vertices)
             else:
                 raise ValueError('cannot parse layer id: %s', id_)
 
+        #for c in all_contours:
+        #    print '\n============================='
+        #    print c
+        #    print '\n=============================\nEND'
         x_series = [v[0] for v in all_vertices]
         y_series = [v[1] for v in all_vertices]
-        print 'box', min(x_series), max(x_series), min(y_series), max(y_series)
         offset_x = (min(x_series) + max(x_series)) / 2
         offset_y = (min(y_series) + max(y_series)) / 2
         contours_data = []
@@ -129,7 +133,7 @@ class Main(object):
             'EndHeader',
             'tag-version 1',
             'tag-number-of-contours %s' % len(all_contours),
-            'tag-section-spacing 0.2',
+            'tag-section-spacing 20',
             'tag-BEGIN-DATA'
         ])
         cnt = 0
@@ -186,7 +190,7 @@ class Main(object):
         for idx, cell_tuple in enumerate(all_cells):
             id_, depth, vertices = cell_tuple
             cells.append([
-                idx, vertices[0] - offset_x, offset_y - vertices[1], int(depth) * 0.2, depth, 'mdplot.cell', '', '', '', '', '', '', '', 'mdplot'
+                idx, vertices[0] - offset_x, offset_y - vertices[1], int(depth) * 20, depth, 'mdplot.cell', '', '', '', '', '', '', '', 'mdplot'
             ])
         cells.append(['csvf-section-end', 'Cells'])
         #fields = ['Cell_Number', 'X', 'Y', 'Z', 'Section', 'Name', 'Study_Number', 'Geography', 'Area', 'Size', 'Statistic',

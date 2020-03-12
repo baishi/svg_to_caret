@@ -1,10 +1,16 @@
 #! -*- encoding: utf-8
 import os, time, datetime, re
+import logging
 import csv
 from collections import namedtuple
 
 from lxml import etree
 from svgpathparse import parsePath
+
+logging.basicConfig(format='%(asctime)s %(levelname)-5.5s %(message)s')
+
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 def pascal_row(n):
     # This returns the nth row of Pascal's Triangle
@@ -42,17 +48,34 @@ def make_bezier(xys):
 
 class LayerId(object):
     id_re = re.compile(r'(\d+)[a-z]? +([a-z]+)/([a-z]+).*?', re.I)
+    id2_re = re.compile(r'(?:Section)+\ *(\d+)', re.I)
+    id3_re = re.compile(r'(?:Sezione)+\ *(\d+)cau', re.I)
     def __init__(self, layer_id):
+        self.log = logging.getLogger(__name__)
         self.layer_id = layer_id
         matches = self.id_re.match(layer_id)
         if matches:
             self.seq = matches.group(1)
             self.lr = matches.group(2)
             self.rc = matches.group(3)
+            self.log.info('first matched: seq %s lr %s rc %s', self.seq, self.lr, self.rc)
         else:
-            self.seq = -1
-            lsef.lr = None
-            self.rc = None
+            matches = self.id2_re.match(layer_id)
+            if matches:
+                self.seq = matches.group(1)
+                self.lr = None
+                self.rc = 'r'
+                self.log.info('second matched: seq %s lr %s rc %s', self.seq, self.lr, self.rc)
+            else:
+                matches = self.id3_re.match(layer_id)
+                if matches:
+                    self.seq = matches.group(1)
+                    self.lr = None
+                    self.rc = 'c'
+                else:
+                    self.seq = -1
+                    self.lr = None
+                    self.rc = None
 
 
     def __lt__(self, other):
@@ -65,17 +88,21 @@ class LayerId(object):
         elif self.rc == other.rc and self.rc == 'c':
             return self.seq >= other.seq
         else:
-            True
+            try:
+                return int(self.layer_id) < int(other.layer_id)
+            except ValueError:
+                return self.layer_id < other.layer_id
 
 class Caret(object):
     ts = [t/5. for t in range(6)]
 
-    def __init__(self, caret_name):
+    def __init__(self, caret_name, spacing=6.):
         self.caret_name = caret_name
         self._all_vertices = []
         self._cells = []
         self._contours = []
         self._layers = {}
+        self._spacing = spacing
 
     def get_vertices(self, parsed_d):
         vertices = []
@@ -108,7 +135,7 @@ class Caret(object):
 
         # this is one cell
         if stroke == '#313185' or fill == '#313185' or fill == '#00aeef' or \
-           stroke == '#0000ff' or fill == '#0000ff' or len(parsed_vertices) == 26:
+           stroke == '#0000ff' or fill == '#0000ff':
             self.add_cell(layer_id, 'mdplot.blue', parsed_vertices)
 
         elif stroke == '#ed1c24' or fill == '#ed1c24' or stroke == '#d52e2b' or fill == '#d52e2b':
@@ -119,7 +146,7 @@ class Caret(object):
 
         else:
             if stroke != '#000000':
-                print '[WARN] path stroke', stroke, 'fill', fill, 'treated as contour', 'vertices', len(parsed_vertices)
+                log.warn('path stroke %s, fill %s treated as contour, vertices: %s', stroke, fill, len(parsed_vertices))
             self.add_contour(layer_id, parsed_vertices)
 
     def parse_polygon(self, layer_id, polygon):
@@ -140,7 +167,8 @@ class Caret(object):
            stroke == '#0000ff' or fill == '#0000ff':
             self.add_cell(layer_id, 'mdplot.blue', parsed_vertices)
 
-        elif stroke == '#ed1c24' or fill == '#ed1c24' or stroke == '#d52e2b' or fill == '#d52e2b':
+        elif stroke == '#ed1c24' or fill == '#ed1c24' or stroke == '#d52e2b' or \
+            fill == '#d52e2b' or fill == '#ff0000':
             self.add_cell(layer_id, 'mdplot.red', parsed_vertices)
 
         elif stroke == '#fff200' or fill == '#fff200' or stroke == '#808000' or fill == '#808000':
@@ -148,10 +176,41 @@ class Caret(object):
 
         else:
             if stroke != '#000000':
-                print '[WARN] polygon stroke', stroke, 'fill', fill, 'treated as contour', 'vertices', len(parsed_vertices)
+                log.warn('polygon stroke %s fill %s treated as contour, vertices %s', stroke, fill, len(parsed_vertices))
+            self.add_contour(layer_id, parsed_vertices)
+
+    def parse_polyline(self, layer_id, polyline):
+        p = parsePath('M' + polyline.get('points'))
+        stroke = polyline.get('stroke')
+        fill = polyline.get('fill')
+        #color = stroke or fill
+        #print color, p
+        parsed_vertices = self.get_vertices(p)
+
+        if stroke is not None:
+            stroke = stroke.lower()
+        if fill is not None:
+            fill = fill.lower()
+
+        # this is one cell
+        if stroke == '#313185' or fill == '#313185' or fill == '#00aeef' or \
+           stroke == '#0000ff' or fill == '#0000ff' or stroke == '#3a53a4':
+            self.add_cell(layer_id, 'mdplot.blue', parsed_vertices)
+        elif stroke == '#ed1c24' or fill == '#ed1c24' or stroke == '#d52e2b' or \
+            fill == '#d52e2b' or fill == '#ff0000':
+            self.add_cell(layer_id, 'mdplot.red', parsed_vertices)
+
+        elif stroke == '#fff200' or fill == '#fff200' or stroke == '#808000' or fill == '#808000':
+            self.add_cell(layer_id, 'mdplot.yellow', parsed_vertices)
+        elif stroke == '#00884b' and len(parsed_vertices) > 5:
+            self.add_contour(layer_id, parsed_vertices)
+        else:
+            if stroke != '#000000':
+                log.warn('polyline stroke %s fill %s treated as contour, vertices %s', stroke, fill, len(parsed_vertices))
             self.add_contour(layer_id, parsed_vertices)
 
     def add_cell(self, layer_id, type_, vertices):
+        log.debug('add cell type %s to layer %s', type_, layer_id)
         x_coords, y_coords = zip(*vertices)
         center = (sum(x_coords) / len(x_coords), sum(y_coords) / len(y_coords))
         layer = self._layers.get(layer_id, {})
@@ -164,6 +223,7 @@ class Caret(object):
         self._all_vertices.append([center[0], center[1]])
 
     def add_contour(self, layer_id, vertices):
+        log.debug('add contour vertices %s to layer %s', vertices, layer_id)
         layer = self._layers.get(layer_id, {})
         self._layers.setdefault(layer_id, layer)
 
@@ -208,10 +268,11 @@ class Caret(object):
         idx = 0
         for layer_idx, layer_id in enumerate(sorted(self._layers.keys(), key=LayerId)):
             layer = self._layers[layer_id]
+            log.info('dumping cells for layer index: %s, id: %s cells: %s', layer_idx, layer_id, len(layer.get('cells', [])))
             for type_, vertices in layer.get('cells', []):
                 depth = layer_idx
                 cells.append([
-                    idx, vertices[0] - offset_x, offset_y - vertices[1], depth * 20, depth, type_, '', '', '', '', '', '', '', 'mdplot'
+                    idx, vertices[0] - offset_x, offset_y - vertices[1], int(depth * self._spacing), depth, type_, '', '', '', '', '', '', '', 'mdplot'
             ])
                 idx += 1
         cells.append(['csvf-section-end', 'Cells'])
@@ -238,12 +299,13 @@ class Caret(object):
             'EndHeader',
             'tag-version 1',
             'tag-number-of-contours %s' % 0,
-            'tag-section-spacing 20',
+            'tag-section-spacing %s' % (self._spacing),
             'tag-BEGIN-DATA'
         ])
         cnt = 0
         for layer_idx, layer_id in enumerate(sorted(self._layers.keys(), key=LayerId)):
             layer = self._layers[layer_id]
+            log.info('dumping contours for layer index: %s id: %s cells: %s', layer_idx, layer_id, len(layer.get('cells', [])))
             for vertices in layer.get('contours', []):
                 depth = layer_idx
                 contours_data.append('%s %s %s' % (cnt, len(vertices), depth))
@@ -284,9 +346,10 @@ class Caret(object):
             writer.writerows(cc)
 
 class Main(object):
-    def __init__(self):
+    def __init__(self, spacing=6.):
         "initialize"
         self.ts = [t/5. for t in range(6)]
+        self._spacing = spacing
 
     def get_vertices(self, parsed_d):
         vertices = []
@@ -319,23 +382,27 @@ class Main(object):
             'label': '{' + nsmap['inkscape'] + '}label',
         }
         #for x in root.xpath('.//svg:svg', namespaces=nsmap):
-        caret = Caret(fn_base)
+        caret = Caret(fn_base, self._spacing)
 
         for g in root.xpath('./svg:g', namespaces=nsmap):
             id_ = re.sub(r'_x([\da-fA-F][\da-fA-F])_', lambda match_o: chr(int(match_o.group(1), 16)), g.get('id'))
             id_ = id_.replace('_', ' ')
             layer_id = id_
-            print 'working on layer', id_
-            matches = re.search(r'(?:(\d+)([a-z]?))\s*.*$', id_)
+            matches = re.search(r'(?:(\d+)([a-z]?))\s*.*$', layer_id)
             if matches:
+                #log.info('working on layer %r %s', layer_id, matches.groups())
                 slide = matches.group(1)
                 section_suffix = matches.group(2)
                 depth = slide
                 for path in g.xpath('.//svg:path', namespaces=nsmap):
+                    log.debug('parse path %s', etree.tostring(path))
                     caret.parse_path(layer_id, path)
 
                 for polygon in g.xpath('.//svg:polygon', namespaces=nsmap):
                     caret.parse_polygon(layer_id, polygon)
+
+                for polyline in g.xpath('.//svg:polyline', namespaces=nsmap):
+                    caret.parse_polyline(layer_id, polyline)
             else:
                 if id_ == 'Background':
                     continue
@@ -348,11 +415,11 @@ class Main(object):
 
 
 if __name__ == '__main__':
-    main = Main()
-    #main.run('MF10_claustroSolo')
+    main = Main(spacing=6.)
     #main.run('mf3r_SOLO CLAUSTRO')
     #main.run('(1bis)NM31claustroecellule')
     #main.run('(2)MF6soloclaustroconcellule')
     #main.run('MF10_claustroSolo')
     #main.run('MF4 Ros-Cauclaustro2')
-    main.run('mf3r_SOLO CLAUSTRO_x MIKI')
+    #main.run('mf3r_SOLO CLAUSTRO_x MIKI')
+    main.run('(1bis)NM31claustroecellule')
